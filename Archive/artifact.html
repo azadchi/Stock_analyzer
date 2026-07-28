@@ -1,0 +1,236 @@
+"""
+اپلیکیشن تحلیل بورس - نسخه پیشرفته
+اجرا: python app.py
+"""
+
+import os
+import io
+import json
+from datetime import datetime
+from flask import Flask, request, render_template_string, send_file
+from google import genai
+from PIL import Image
+import openpyxl
+from openpyxl import load_workbook
+
+app = Flask(__name__)
+HISTORY_FILE = "analysis_history.xlsx"
+MODEL = "gemini-3-flash-preview"
+
+PROMPT = """
+تو نقش یک مدیر سرمایه‌گذاری حرفه‌ای صندوق بورس ایران رو داری.
+
+لطفاً خروجی رو دقیقاً به این فرمت JSON بده و هیچ چیز دیگه‌ای ننویس:
+{
+  "symbol": "نماد سهم (اگر مشخص بود)",
+  "price": "قیمت فعلی",
+  "trend": "روند (صعودی/نزولی/خنثی)",
+  "support": "سطح حمایت",
+  "resistance": "سطح مقاومت",
+  "rsi": "مقدار RSI",
+  "macd": "وضعیت MACD",
+  "ichimoku": "وضعیت Ichimoku",
+  "mfi": "مقدار MFI",
+  "atr": "مقدار ATR",
+  "volume": "وضعیت حجم",
+  "entry": "نقطه ورود پیشنهادی",
+  "stop_loss": "حد ضرر",
+  "target1": "هدف اول",
+  "target2": "هدف دوم",
+  "verdict": "خرید یا صبر و بررسی بیشتر یا فروش",
+  "summary": "جمع‌بندی کوتاه (۲-۳ جمله)"
+}
+
+توجه: این فقط جنبه آموزشی داره و توصیه مالی نیست.
+"""
+
+PAGE = """
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>تحلیل بورس</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: Tahoma, Arial, sans-serif; background: #f0f2f5; margin: 0; padding: 1.5rem; direction: rtl; }
+  .container { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 22px; margin-bottom: 0.25rem; }
+  p.sub { color: #666; margin-top: 0; margin-bottom: 1.5rem; font-size: 14px; }
+  .card { background: white; border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 1.5rem; }
+  .dropzone { border: 2px dashed #bbb; border-radius: 10px; padding: 1.5rem; text-align: center; color: #777; margin-bottom: 1rem; }
+  input[type=file] { margin-top: 0.5rem; }
+  .btn { background: #2563eb; color: white; border: none; padding: 0.65rem 1.4rem; border-radius: 8px; font-size: 15px; cursor: pointer; margin-left: 0.5rem; }
+  .btn:hover { background: #1d4ed8; }
+  .btn-pdf { background: #16a34a; }
+  .btn-pdf:hover { background: #15803d; }
+  .verdict-buy { background: #dcfce7; color: #166534; border-radius: 8px; padding: 0.5rem 1rem; font-weight: bold; display: inline-block; }
+  .verdict-sell { background: #fee2e2; color: #991b1b; border-radius: 8px; padding: 0.5rem 1rem; font-weight: bold; display: inline-block; }
+  .verdict-wait { background: #fef9c3; color: #854d0e; border-radius: 8px; padding: 0.5rem 1rem; font-weight: bold; display: inline-block; }
+  table { width: 100%; border-collapse: collapse; margin-top: 1rem; font-size: 14px; }
+  th { background: #f1f5f9; padding: 0.6rem 0.8rem; text-align: right; font-weight: 600; border-bottom: 2px solid #e2e8f0; }
+  td { padding: 0.55rem 0.8rem; border-bottom: 1px solid #f1f5f9; }
+  tr:hover td { background: #f8fafc; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1rem; }
+  .info-box { background: #f8fafc; border-radius: 8px; padding: 0.75rem 1rem; }
+  .info-box .label { font-size: 12px; color: #64748b; margin-bottom: 0.2rem; }
+  .info-box .value { font-size: 15px; font-weight: 600; }
+  .summary-box { background: #eff6ff; border-right: 4px solid #2563eb; padding: 0.75rem 1rem; border-radius: 0 8px 8px 0; margin-top: 1rem; font-size: 14px; line-height: 1.8; }
+  .error { color: #b91c1c; background: #fef2f2; padding: 1rem; border-radius: 8px; }
+  .disclaimer { font-size: 12px; color: #999; margin-top: 1rem; text-align: center; }
+  .preview-grid { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.75rem; }
+  .preview-grid img { max-height: 180px; border-radius: 8px; border: 1px solid #e2e8f0; }
+  @media print { .no-print { display: none; } }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="card no-print">
+    <h1>📊 تحلیل بورس ایران</h1>
+    <p class="sub">چارت تکنیکال و/یا تابلوی TSETMC رو آپلود کن</p>
+    <form method="POST" enctype="multipart/form-data">
+      <div class="dropzone">
+        چند عکس هم‌زمان انتخاب کن (jpg / png)
+        <br><input type="file" name="images" accept="image/*" multiple required>
+      </div>
+      <button class="btn" type="submit">🔍 شروع تحلیل</button>
+    </form>
+  </div>
+
+  {% if error %}
+    <div class="card error">خطا: {{ error }}</div>
+  {% endif %}
+
+  {% if data %}
+  <div class="card" id="result-card">
+    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem;">
+      <div>
+        <strong style="font-size:18px;">{{ data.symbol or 'نماد نامشخص' }}</strong>
+        &nbsp;&nbsp;
+        <span class="verdict-{{ data.verdict_class }}">{{ data.verdict }}</span>
+      </div>
+      <button class="btn btn-pdf no-print" onclick="window.print()">🖨️ ذخیره PDF</button>
+    </div>
+
+    <div class="grid2" style="margin-top:1rem;">
+      <div class="info-box"><div class="label">قیمت فعلی</div><div class="value">{{ data.price }}</div></div>
+      <div class="info-box"><div class="label">روند</div><div class="value">{{ data.trend }}</div></div>
+      <div class="info-box"><div class="label">حمایت</div><div class="value">{{ data.support }}</div></div>
+      <div class="info-box"><div class="label">مقاومت</div><div class="value">{{ data.resistance }}</div></div>
+    </div>
+
+    <table>
+      <tr><th>اندیکاتور</th><th>مقدار / وضعیت</th></tr>
+      <tr><td>RSI</td><td>{{ data.rsi }}</td></tr>
+      <tr><td>MACD</td><td>{{ data.macd }}</td></tr>
+      <tr><td>Ichimoku</td><td>{{ data.ichimoku }}</td></tr>
+      <tr><td>MFI</td><td>{{ data.mfi }}</td></tr>
+      <tr><td>ATR</td><td>{{ data.atr }}</td></tr>
+      <tr><td>حجم</td><td>{{ data.volume }}</td></tr>
+    </table>
+
+    <table style="margin-top:0.75rem;">
+      <tr><th>نقطه ورود</th><th>حد ضرر</th><th>هدف اول</th><th>هدف دوم</th></tr>
+      <tr><td>{{ data.entry }}</td><td>{{ data.stop_loss }}</td><td>{{ data.target1 }}</td><td>{{ data.target2 }}</td></tr>
+    </table>
+
+    <div class="summary-box">{{ data.summary }}</div>
+
+    {% if previews %}
+    <div class="preview-grid no-print">
+      {% for src in previews %}<img src="{{ src }}">{% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <div class="disclaimer">این تحلیل جنبه آموزشی دارد و توصیه مالی قطعی نیست.</div>
+</div>
+</body>
+</html>
+"""
+
+
+def verdict_class(verdict: str) -> str:
+    if "خرید" in verdict:
+        return "buy"
+    if "فروش" in verdict:
+        return "sell"
+    return "wait"
+
+
+def save_to_excel(data: dict):
+    if os.path.exists(HISTORY_FILE):
+        wb = load_workbook(HISTORY_FILE)
+        ws = wb.active
+    else:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "تاریخچه تحلیل‌ها"
+        headers = ["تاریخ", "نماد", "قیمت", "روند", "حمایت", "مقاومت",
+                   "RSI", "MACD", "Ichimoku", "MFI", "ATR", "حجم",
+                   "ورود", "حد ضرر", "هدف ۱", "هدف ۲", "نتیجه", "خلاصه"]
+        ws.append(headers)
+
+    ws.append([
+        datetime.now().strftime("%Y-%m-%d %H:%M"),
+        data.get("symbol", ""), data.get("price", ""), data.get("trend", ""),
+        data.get("support", ""), data.get("resistance", ""),
+        data.get("rsi", ""), data.get("macd", ""), data.get("ichimoku", ""),
+        data.get("mfi", ""), data.get("atr", ""), data.get("volume", ""),
+        data.get("entry", ""), data.get("stop_loss", ""),
+        data.get("target1", ""), data.get("target2", ""),
+        data.get("verdict", ""), data.get("summary", ""),
+    ])
+    wb.save(HISTORY_FILE)
+
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    result_data = None
+    error = None
+    previews = []
+
+    if request.method == "POST":
+        if not os.environ.get("GEMINI_API_KEY"):
+            error = "متغیر GEMINI_API_KEY تنظیم نشده."
+        else:
+            files = request.files.getlist("images")
+            files = [f for f in files if f and f.filename]
+            if not files:
+                error = "هیچ فایلی انتخاب نشد."
+            else:
+                try:
+                    images = []
+                    for f in files:
+                        img_bytes = f.read()
+                        images.append(Image.open(io.BytesIO(img_bytes)))
+                        b64 = __import__("base64").b64encode(img_bytes).decode()
+                        mime = f.content_type or "image/jpeg"
+                        previews.append(f"data:{mime};base64,{b64}")
+
+                    client = genai.Client()
+                    contents = [PROMPT] + images
+                    response = client.models.generate_content(model=MODEL, contents=contents)
+
+                    raw = response.text.strip()
+                    if raw.startswith("
+```"):
+raw = raw.split("
+```")[1]
+                        if raw.startswith("json"):
+                            raw = raw[4:]
+                    data = json.loads(raw)
+                    data["verdict_class"] = verdict_class(data.get("verdict", ""))
+                    save_to_excel(data)
+                    result_data = data
+                except json.JSONDecodeError:
+                    error = "خروجی مدل قابل پردازش نبود. دوباره امتحان کن."
+                except Exception as e:
+                    error = str(e)
+
+    return render_template_string(PAGE, data=result_data, error=error, previews=previews)
+
+
+if __name__ == "__main__":
+    print("سرور روشن شد → http://127.0.0.1:5000")
+    app.run(debug=True, port=5000)

@@ -1,0 +1,275 @@
+"""
+اپلیکیشن تحلیل بورس - رابط وب
+اجرا: python app.py
+مرورگر: http://127.0.0.1:5000
+"""
+
+import os
+import base64
+import io
+from datetime import datetime
+from flask import Flask, request, render_template_string
+from google import genai
+from PIL import Image
+import openpyxl
+
+app = Flask(__name__)
+EXCEL_FILE = "analysis_history.xlsx"
+MODEL = "gemini-2.0-flash"
+
+ANALYSIS_PROMPT = """
+تو نقش یک مدیر سرمایه‌گذاری حرفه‌ای صندوق بورس ایران رو داری.
+
+اطلاعات سهم:
+- نماد: {symbol}
+- تایم‌فریم: {timeframe}
+- توضیحات اضافه: {notes}
+
+این تصاویر چارت‌های تکنیکال این سهم هستند.
+
+لطفاً به ترتیب زیر تحلیل کن:
+
+**۱. استخراج داده‌های کمی**
+| اندیکاتور | مقدار | وضعیت |
+|-----------|-------|--------|
+قیمت فعلی، RSI، MACD (خط سیگنال و هیستوگرام)، MFI، OBV (روند)، ATR، حجم (نسبت به میانگین)، Ichimoku (ابر، تنکان، کیجون)
+
+**۲. سطوح کلیدی**
+- حمایت‌های مهم: ...
+- مقاومت‌های مهم: ...
+- روند کلی: صعودی / نزولی / خنثی
+
+**۳. تحلیل اندیکاتورها**
+برای هر اندیکاتور یک جمله تفسیر بده.
+
+**۴. پیشنهاد معاملاتی**
+| پارامتر | مقدار |
+|---------|-------|
+| نقطه ورود | |
+| حد ضرر | (بر اساس سطح حمایت کلیدی) |
+| هدف اول | |
+| هدف دوم | |
+| نسبت ریسک به ریوارد | |
+
+**۵. جمع‌بندی**
+حکم نهایی: **خرید** / **صبر و بررسی بیشتر** / **فروش**
+دلیل: (یک جمله)
+
+⚠️ این تحلیل جنبه آموزشی دارد و توصیه مالی نیست.
+"""
+
+BUY_PROMPT = """
+تو یک تریدر حرفه‌ای بورس ایران هستی.
+
+نماد: {symbol} | تایم‌فریم: {timeframe}
+
+فقط روی یافتن بهترین موقعیت خرید تمرکز کن:
+
+**شرایط ورود ایده‌آل:**
+- آیا الان موقعیت خرید وجود دارد؟ بله / خیر
+- دلیل: ...
+
+**اگر بله:**
+| پارامتر | مقدار |
+|---------|-------|
+| قیمت ورود | |
+| حد ضرر | |
+| هدف | |
+| R/R | |
+| اعتبار سیگنال | ضعیف / متوسط / قوی |
+
+**اگر خیر:**
+- چه شرطی باید برقرار شود تا ورود توجیه داشته باشد؟
+
+⚠️ این تحلیل جنبه آموزشی دارد.
+"""
+
+PAGE = """
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>تحلیل تکنیکال بورس</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: Tahoma, Arial, sans-serif; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); min-height: 100vh; margin: 0; padding: 2rem; direction: rtl; }
+  .container { max-width: 860px; margin: 0 auto; }
+  h1 { color: #e2e8f0; font-size: 24px; margin-bottom: 0.25rem; }
+  p.sub { color: #94a3b8; margin-top: 0; margin-bottom: 1.5rem; font-size: 14px; }
+  .card { background: rgba(255,255,255,0.05); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); border-radius: 16px; padding: 1.5rem; margin-bottom: 1.5rem; }
+  .form-row { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
+  .form-group { flex: 1; min-width: 150px; }
+  label { color: #94a3b8; font-size: 13px; display: block; margin-bottom: 0.4rem; }
+  input[type=text], select { width: 100%; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 0.6rem 0.8rem; color: #e2e8f0; font-size: 14px; font-family: Tahoma; }
+  input[type=text]::placeholder { color: #64748b; }
+  .dropzone { border: 2px dashed rgba(255,255,255,0.2); border-radius: 10px; padding: 1.5rem; text-align: center; color: #94a3b8; margin-bottom: 1rem; }
+  input[type=file] { margin-top: 0.5rem; color: #94a3b8; }
+  .btn-row { display: flex; gap: 1rem; flex-wrap: wrap; }
+  button { border: none; padding: 0.7rem 1.5rem; border-radius: 8px; font-size: 15px; cursor: pointer; font-family: Tahoma; font-weight: bold; }
+  .btn-analyze { background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; }
+  .btn-buy { background: linear-gradient(135deg, #f59e0b, #d97706); color: white; }
+  button:hover { opacity: 0.9; transform: translateY(-1px); }
+  .result-card { background: rgba(30,30,60,0.6); border: 1px solid rgba(99,102,241,0.3); border-radius: 12px; padding: 1.5rem; margin-top: 1rem; }
+  .result-card.buy { border-color: rgba(245,158,11,0.4); background: rgba(60,40,0,0.4); }
+  .result-card h3 { margin-top: 0; color: #a5b4fc; font-size: 15px; }
+  .result-card.buy h3 { color: #fcd34d; }
+  .result-text { color: #e2e8f0; white-space: pre-wrap; line-height: 2; font-size: 14px; }
+  .result-text table { border-collapse: collapse; width: 100%; margin: 0.5rem 0; }
+  .result-text td, .result-text th { border: 1px solid rgba(255,255,255,0.15); padding: 0.4rem 0.8rem; }
+  .previews { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }
+  .previews img { max-height: 160px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); }
+  .error { color: #fca5a5; background: rgba(185,28,28,0.2); padding: 1rem; border-radius: 8px; margin-top: 1rem; }
+  .meta { color: #64748b; font-size: 12px; margin-bottom: 0.5rem; }
+  .disclaimer { font-size: 12px; color: #475569; margin-top: 1.5rem; text-align: center; }
+  @media print { body { background: white; } .card { border: 1px solid #ddd; } button { display: none; } }
+  .btn-print { background: rgba(255,255,255,0.1); color: #94a3b8; border: 1px solid rgba(255,255,255,0.15); }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>📊 تحلیل تکنیکال بورس</h1>
+  <p class="sub">چارت سهم رو آپلود کن — چند تصویر (تایم‌فریم‌های مختلف) هم قبول می‌شه</p>
+
+  <div class="card">
+    <form method="POST" enctype="multipart/form-data">
+      <div class="form-row">
+        <div class="form-group">
+          <label>نماد سهم</label>
+          <input type="text" name="symbol" placeholder="مثال: شبندر" value="{{ symbol or '' }}">
+        </div>
+        <div class="form-group">
+          <label>تایم‌فریم</label>
+          <select name="timeframe">
+            {% for tf in ['روزانه', 'هفتگی', 'ماهانه', '۶۰ دقیقه', '۳۰ دقیقه', '۱۵ دقیقه'] %}
+            <option value="{{ tf }}" {% if timeframe == tf %}selected{% endif %}>{{ tf }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>توضیحات (اختیاری)</label>
+          <input type="text" name="notes" placeholder="مثال: نزدیک مقاومت مهم" value="{{ notes or '' }}">
+        </div>
+      </div>
+      <div class="dropzone">
+        📈 یک یا چند تصویر چارت انتخاب کن (jpg/png)
+        <br><input type="file" name="chart_images" accept="image/*" multiple required>
+      </div>
+      <div class="btn-row">
+        <button type="submit" name="action" value="analyze" class="btn-analyze">🔍 تحلیل کامل</button>
+        <button type="submit" name="action" value="buy" class="btn-buy">🎯 بهترین موقعیت خرید</button>
+      </div>
+    </form>
+  </div>
+
+  {% if error %}
+    <div class="error">⚠️ {{ error }}</div>
+  {% endif %}
+
+  {% if images_b64 %}
+  <div class="card">
+    <div class="meta">تصاویر آپلود شده:</div>
+    <div class="previews">
+      {% for img in images_b64 %}
+        <img src="data:image/png;base64,{{ img }}">
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% if result %}
+  <div class="result-card {% if action == 'buy' %}buy{% endif %}">
+    <h3>{% if action == 'buy' %}🎯 موقعیت خرید — {{ symbol }}{% else %}📊 تحلیل تکنیکال — {{ symbol }}{% endif %} | {{ timeframe }}</h3>
+    <div class="meta">{{ analysis_time }}</div>
+    <div class="result-text">{{ result }}</div>
+    <br>
+    <button class="btn-print" onclick="window.print()">🖨️ چاپ / ذخیره PDF</button>
+  </div>
+  {% endif %}
+
+  <div class="disclaimer">این تحلیل جنبه آموزشی دارد و توصیه مالی قطعی نیست.</div>
+</div>
+</body>
+</html>
+"""
+
+
+def save_to_excel(symbol, timeframe, action, filenames, result_text):
+    try:
+        if os.path.exists(EXCEL_FILE):
+            wb = openpyxl.load_workbook(EXCEL_FILE)
+            ws = wb.active
+        else:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.append(["تاریخ", "نماد", "تایم‌فریم", "نوع تحلیل", "فایل‌ها", "نتیجه"])
+        ws.append([
+            datetime.now().strftime("%Y-%m-%d %H:%M"),
+            symbol or "-",
+            timeframe or "-",
+            "موقعیت خرید" if action == "buy" else "تحلیل کامل",
+            filenames,
+            result_text
+        ])
+        wb.save(EXCEL_FILE)
+    except Exception:
+        pass
+
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    result = error = None
+    images_b64 = []
+    symbol = timeframe = notes = action = analysis_time = None
+
+    if request.method == "POST":
+        if not os.environ.get("GEMINI_API_KEY"):
+            error = "متغیر GEMINI_API_KEY تنظیم نشده."
+        else:
+            symbol = request.form.get("symbol", "").strip() or "نامشخص"
+            timeframe = request.form.get("timeframe", "روزانه")
+            notes = request.form.get("notes", "").strip() or "-"
+            action = request.form.get("action", "analyze")
+            files = request.files.getlist("chart_images")
+            files = [f for f in files if f and f.filename]
+
+            if not files:
+                error = "هیچ فایلی انتخاب نشد."
+            else:
+                try:
+                    images = []
+                    for f in files:
+                        img = Image.open(f.stream)
+                        images.append(img)
+                        buf = io.BytesIO()
+                        img.save(buf, format="PNG")
+                        images_b64.append(base64.b64encode(buf.getvalue()).decode())
+
+                    prompt_template = BUY_PROMPT if action == "buy" else ANALYSIS_PROMPT
+                    prompt = prompt_template.format(symbol=symbol, timeframe=timeframe, notes=notes)
+
+                    client = genai.Client()
+                    contents = [prompt] + images
+                    response = client.models.generate_content(model=MODEL, contents=contents)
+                    result = response.text
+                    analysis_time = datetime.now().strftime("%Y/%m/%d %H:%M")
+
+                    filenames = ", ".join(f.filename for f in files)
+                    save_to_excel(symbol, timeframe, action, filenames, result)
+
+                except Exception as e:
+                    error = str(e)
+
+    return render_template_string(
+        PAGE,
+        result=result, error=error,
+        images_b64=images_b64,
+        symbol=symbol, timeframe=timeframe, notes=notes,
+        action=action, analysis_time=analysis_time
+    )
+
+
+if __name__ == "__main__":
+    print("سرور روشن شد → http://127.0.0.1:5000")
+    app.run(debug=True, port=5000)
+```کد کامل بود. هیچ محتوایی باقی نمانده.
+

@@ -1,0 +1,228 @@
+"""
+اپلیکیشن تحلیل بورس - نسخه کامل
+اجرا: python app.py
+مرورگر: http://127.0.0.1:5000
+"""
+
+import os
+import io
+from datetime import datetime
+from flask import Flask, request, render_template_string, send_file
+from google import genai
+from PIL import Image
+import openpyxl
+
+app = Flask(__name__)
+HISTORY_FILE = "analysis_history.xlsx"
+
+PROMPT = """
+تو نقش یک مدیر سرمایه‌گذاری حرفه‌ای صندوق بورس ایران رو داری. این عکس یک چارت تکنیکال یک سهم بورس ایرانه.
+
+لطفاً:
+1. تمام اعداد و اندیکاتورهای قابل مشاهده در تصویر رو دقیق استخراج کن (قیمت فعلی، Ichimoku، RSI، MACD، MFI، OBV، ATR، حجم)
+2. وضعیت روند، حمایت و مقاومت رو مشخص کن
+3. برای هر اندیکاتور یک تحلیل کوتاه بده
+4. نقطه ورود پیشنهادی، حد ضرر (بر اساس ATR)، و اهداف قیمتی رو بگو
+5. جمع‌بندی نهایی رو با یکی از این سه حالت بده: 🟢 خرید | 🟡 صبر و بررسی بیشتر | 🔴 فروش
+6. اگر داده کافی برای تصمیم قطعی نیست، صریح بگو
+
+توجه: این فقط جنبه آموزشی داره و توصیه مالی نیست.
+"""
+
+MODEL = "gemini-2.0-flash"
+
+PAGE = """
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>تحلیل بورس</title>
+<style>
+  @media print {
+    .no-print { display: none !important; }
+    body { background: white; padding: 0; }
+    .card { box-shadow: none; border: 1px solid #ddd; }
+  }
+  body { font-family: Tahoma, Arial, sans-serif; background: #f0f2f5; margin: 0; padding: 2rem; direction: rtl; }
+  .container { max-width: 800px; margin: 0 auto; }
+  h1 { font-size: 24px; margin-bottom: 0.25rem; }
+  p.sub { color: #666; margin-top: 0; margin-bottom: 1.5rem; font-size: 14px; }
+  .card { background: white; border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 12px rgba(0,0,0,0.08); margin-bottom: 1.5rem; }
+  .dropzone { border: 2px dashed #bbb; border-radius: 10px; padding: 1.5rem; text-align: center; color: #777; margin-bottom: 1rem; }
+  input[type=file] { margin-top: 0.5rem; }
+  .btn { display: inline-block; padding: 0.65rem 1.4rem; border-radius: 8px; font-size: 15px; cursor: pointer; border: none; margin-left: 0.5rem; }
+  .btn-primary { background: #2563eb; color: white; }
+  .btn-primary:hover { background: #1d4ed8; }
+  .btn-success { background: #16a34a; color: white; }
+  .btn-success:hover { background: #15803d; }
+  .btn-gray { background: #6b7280; color: white; }
+  .btn-gray:hover { background: #4b5563; }
+  .result-card { background: #f9fafb; border-radius: 10px; padding: 1.25rem; white-space: pre-wrap; line-height: 2; font-size: 14.5px; border: 1px solid #e5e7eb; }
+  .section-title { font-weight: bold; font-size: 15px; margin-bottom: 0.75rem; color: #1f2937; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th { background: #f3f4f6; padding: 0.6rem 0.75rem; text-align: right; border: 1px solid #e5e7eb; color: #374151; }
+  td { padding: 0.55rem 0.75rem; border: 1px solid #e5e7eb; color: #4b5563; }
+  tr:nth-child(even) td { background: #f9fafb; }
+  .error { color: #b91c1c; background: #fef2f2; padding: 1rem; border-radius: 8px; }
+  .disclaimer { font-size: 12px; color: #9ca3af; margin-top: 1rem; text-align: center; }
+  .preview-grid { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 0.75rem; }
+  .preview-grid img { max-height: 160px; border-radius: 8px; border: 1px solid #e5e7eb; }
+  .badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 999px; font-size: 12px; background: #dbeafe; color: #1d4ed8; margin-bottom: 0.5rem; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>📊 تحلیل تکنیکال بورس</h1>
+  <p class="sub">چارت‌های تکنیکال رو آپلود کن تا تحلیل کامل بگیری</p>
+
+  <div class="card no-print">
+    <form method="POST" enctype="multipart/form-data">
+      <div class="dropzone">
+        یک یا چند عکس چارت (jpg / png) انتخاب کن
+        <br><input type="file" name="chart_images" accept="image/*" multiple required>
+      </div>
+      <button type="submit" class="btn btn-primary">🔍 شروع تحلیل</button>
+      {% if history %}
+      <a href="/history" class="btn btn-gray">📋 تاریخچه</a>
+      {% endif %}
+    </form>
+  </div>
+
+  {% if error %}
+  <div class="card"><div class="error">⚠️ خطا: {{ error }}</div></div>
+  {% endif %}
+
+  {% if results %}
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+      <span class="section-title">نتایج تحلیل ({{ results|length }} تصویر)</span>
+      <button onclick="window.print()" class="btn btn-success no-print">🖨️ چاپ / PDF</button>
+    </div>
+    {% for r in results %}
+    <div style="margin-bottom:1.5rem;">
+      <span class="badge">تصویر {{ loop.index }}: {{ r.filename }}</span>
+      <div class="result-card">{{ r.text }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  <div class="disclaimer">این تحلیل جنبه آموزشی دارد و توصیه مالی قطعی نیست.</div>
+  {% endif %}
+</div>
+</body>
+</html>
+"""
+
+HISTORY_PAGE = """
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>تاریخچه تحلیل‌ها</title>
+<style>
+  body { font-family: Tahoma, Arial, sans-serif; background: #f0f2f5; margin: 0; padding: 2rem; direction: rtl; }
+  .container { max-width: 900px; margin: 0 auto; }
+  .card { background: white; border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+  h1 { font-size: 22px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 1rem; }
+  th { background: #f3f4f6; padding: 0.6rem 0.75rem; text-align: right; border: 1px solid #e5e7eb; }
+  td { padding: 0.55rem 0.75rem; border: 1px solid #e5e7eb; color: #374151; vertical-align: top; max-width: 400px; word-break: break-word; }
+  tr:nth-child(even) td { background: #f9fafb; }
+  .btn { display: inline-block; padding: 0.5rem 1rem; border-radius: 8px; font-size: 14px; cursor: pointer; border: none; background: #2563eb; color: white; text-decoration: none; margin-bottom: 1rem; }
+  .btn:hover { background: #1d4ed8; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>📋 تاریخچه تحلیل‌ها</h1>
+  <a href="/" class="btn">← بازگشت</a>
+  <a href="/download" class="btn" style="background:#16a34a; margin-right:0.5rem;">⬇️ دانلود اکسل</a>
+  <div class="card">
+    {% if rows %}
+    <table>
+      <tr><th>#</th><th>تاریخ و ساعت</th><th>نام فایل</th><th>خلاصه تحلیل</th></tr>
+      {% for row in rows %}
+      <tr>
+        <td>{{ loop.index }}</td>
+        <td>{{ row[0] }}</td>
+        <td>{{ row[1] }}</td>
+        <td>{{ row[2][:300] }}{% if row[2]|length > 300 %}...{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <p style="color:#9ca3af;">هنوز تحلیلی ذخیره نشده.</p>
+    {% endif %}
+  </div>
+</div>
+</body>
+</html>
+"""
+
+
+def save_to_excel(filename: str, analysis: str):
+    if os.path.exists(HISTORY_FILE):
+        wb = openpyxl.load_workbook(HISTORY_FILE)
+        ws = wb.active
+    else:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "تاریخچه"
+        ws.append(["تاریخ و ساعت", "نام فایل", "تحلیل"])
+    ws.append([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), filename, analysis])
+    wb.save(HISTORY_FILE)
+
+
+def load_history():
+    if not os.path.exists(HISTORY_FILE):
+        return []
+    wb = openpyxl.load_workbook(HISTORY_FILE)
+    ws = wb.active
+    rows = list(ws.iter_rows(min_row=2, values_only=True))
+    return [r for r in rows if r[0]]
+
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    results, error = [], None
+
+    if request.method == "POST":
+        if not os.environ.get("GEMINI_API_KEY"):
+            error = "متغیر GEMINI_API_KEY تنظیم نشده."
+        else:
+            files = request.files.getlist("chart_images")
+            if not files or files[0].filename == "":
+                error = "هیچ فایلی انتخاب نشد."
+            else:
+                client = genai.Client()
+                for f in files:
+                    try:
+                        image = Image.open(f.stream)
+                        response = client.models.generate_content(
+                            model=MODEL, contents=[PROMPT, image]
+                        )
+                        text = response.text
+                        save_to_excel(f.filename, text)
+                        results.append({"filename": f.filename, "text": text})
+                    except Exception as e:
+                        results.append({"filename": f.filename, "text": f"خطا: {e}"})
+
+    history = load_history()
+    return render_template_string(PAGE, results=results, error=error, history=history)
+
+
+@app.route("/history")
+def history():
+    rows = load_history()
+    return render_template_string(HISTORY_PAGE, rows=rows)
+
+
+@app.route("/download")
+def download():
+    if not os.path.exists(HISTORY_FILE):
+        return "فایل اکسل وجود ندارد.", 404
+    return send_file(HISTORY_FILE, as_attachment=True)
+
+
+if __name__ == "__main__":
+    print("سرور روشن شد → http://127.0.0.1:5000")
+    app.run(debug=True, port=5000)
