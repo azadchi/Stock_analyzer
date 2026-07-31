@@ -1,0 +1,146 @@
+"""
+اپلیکیشن تحلیل بورس - رابط وب ساده
+اجرا: python app.py
+سپس مرورگر رو باز کن روی: http://127.0.0.1:5000
+"""
+
+import os
+from flask import Flask, request, render_template_string, jsonify
+from google import genai
+from PIL import Image
+
+app = Flask(__name__)
+
+PROMPT = """
+تو نقش یک مدیر سرمایه‌گذاری حرفه‌ای صندوق بورس ایران رو داری. این عکس یک چارت تکنیکال یک سهم بورس ایرانه.
+
+لطفاً:
+1. تمام اعداد و اندیکاتورهای قابل مشاهده در تصویر رو دقیق استخراج کن (قیمت فعلی، Ichimoku، RSI، MACD، MFI، OBV، ATR، حجم)
+2. وضعیت روند، حمایت و مقاومت رو مشخص کن
+3. برای هر اندیکاتور یک تحلیل کوتاه بده
+4. نقطه ورود پیشنهادی، حد ضرر (بر اساس ATR)، و اهداف قیمتی رو بگو
+5. جمع‌بندی نهایی رو با یکی از این سه حالت بده: خرید | صبر و بررسی بیشتر | فروش
+6. اگر داده کافی برای تصمیم قطعی نیست، صریح بگو
+
+توجه: این فقط جنبه آموزشی داره و توصیه مالی نیست.
+"""
+
+MODEL ="gemini-3.1-flash-lite"
+
+PAGE = """
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>اپلیکیشن تحلیل بورس</title>
+<style>
+  body { font-family: Tahoma, Arial, sans-serif; background: #f4f5f7; margin: 0; padding: 2rem; direction: rtl; }
+  .container { max-width: 720px; margin: 0 auto; background: white; border-radius: 12px; padding: 2rem; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }
+  h1 { font-size: 22px; margin-bottom: 0.25rem; }
+  p.sub { color: #666; margin-top: 0; margin-bottom: 1.5rem; font-size: 14px; }
+  .dropzone { border: 2px dashed #bbb; border-radius: 10px; padding: 2rem; text-align: center; color: #777; margin-bottom: 1rem; }
+  input[type=file] { margin-top: 0.75rem; }
+  button { background: #2563eb; color: white; border: none; padding: 0.7rem 1.5rem; border-radius: 8px; font-size: 15px; cursor: pointer; }
+  button:hover { background: #1d4ed8; }
+  button:disabled { background: #93c5fd; cursor: not-allowed; }
+  .result { margin-top: 1.5rem; background: #f9fafb; border-radius: 10px; padding: 1.25rem; white-space: pre-wrap; line-height: 1.9; font-size: 14.5px; border: 1px solid #eee; }
+  .error { color: #b91c1c; background: #fef2f2; padding: 1rem; border-radius: 8px; margin-top: 1rem; }
+  .loading { color: #2563eb; margin-top: 1rem; }
+  img.preview { max-width: 100%; border-radius: 8px; margin-top: 1rem; }
+  .disclaimer { font-size: 12px; color: #999; margin-top: 1.5rem; text-align: center; }
+</style>
+</head>
+<body>
+  <div class="container">
+    <h1>📊 اپلیکیشن تحلیل بورس</h1>
+    <p class="sub">عکس چارت تکنیکال سهم رو آپلود کن تا تحلیل کامل بگیری</p>
+
+    <form id="analyzeForm">
+      <div class="dropzone">
+        عکس چارت (jpg / png) رو انتخاب کن
+        <br><input type="file" id="chartImage" name="chart_image" accept="image/*" required>
+      </div>
+      <button type="submit" id="submitBtn">شروع تحلیل</button>
+    </form>
+
+    <div id="loadingBox" class="loading" style="display:none;">⏳ در حال تحلیل، لطفاً صبر کن...</div>
+    <div id="errorBox" class="error" style="display:none;"></div>
+    <div id="resultBox" class="result" style="display:none;"></div>
+
+    <div class="disclaimer">این تحلیل جنبه آموزشی دارد و توصیه مالی قطعی نیست.</div>
+  </div>
+
+<script>
+const form = document.getElementById('analyzeForm');
+const submitBtn = document.getElementById('submitBtn');
+const loadingBox = document.getElementById('loadingBox');
+const errorBox = document.getElementById('errorBox');
+const resultBox = document.getElementById('resultBox');
+
+form.addEventListener('submit', async function(e) {
+  e.preventDefault(); // جلوگیری از رفرش کامل صفحه
+
+  errorBox.style.display = 'none';
+  resultBox.style.display = 'none';
+  loadingBox.style.display = 'block';
+  submitBtn.disabled = true;
+
+  const formData = new FormData(form);
+
+  try {
+    const res = await fetch('/analyze', {
+      method: 'POST',
+      body: formData
+    });
+    const data = await res.json();
+
+    if (data.error) {
+      errorBox.textContent = 'خطا: ' + data.error;
+      errorBox.style.display = 'block';
+    } else {
+      resultBox.textContent = data.result;
+      resultBox.style.display = 'block';
+    }
+  } catch (err) {
+    errorBox.textContent = 'خطا: ' + err.message;
+    errorBox.style.display = 'block';
+  } finally {
+    loadingBox.style.display = 'none';
+    submitBtn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
+"""
+
+
+@app.route("/", methods=["GET"])
+def index():
+    return render_template_string(PAGE)
+
+
+@app.route("/analyze", methods=["POST"])
+def analyze():
+    if not os.environ.get("GEMINI_API_KEY"):
+        return jsonify(error="متغیر GEMINI_API_KEY تنظیم نشده. اول کلید API رو ست کن و برنامه رو دوباره اجرا کن.")
+
+    uploaded_file = request.files.get("chart_image")
+    if not uploaded_file or uploaded_file.filename == "":
+        return jsonify(error="هیچ فایلی انتخاب نشد.")
+
+    try:
+        image = Image.open(uploaded_file.stream)
+        client = genai.Client()
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=[PROMPT, image],
+        )
+        return jsonify(result=response.text)
+    except Exception as e:
+        return jsonify(error=str(e))
+
+
+if __name__ == "__main__":
+    print("سرور روشن شد. مرورگر رو باز کن روی: http://127.0.0.1:5000")
+    app.run(debug=True, port=5000)

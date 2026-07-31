@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>تحلیل‌ساز بورس</title>
+<style>
+  :root{
+    --bg:#0f1420; --panel:#161d2e; --panel2:#1d2540; --border:#2a3350;
+    --text:#e8ebf3; --muted:#8b93ab; --accent:#4f8cff;
+    --green:#2fbf71; --red:#e5484d; --amber:#e0a638; --gray:#6b7280;
+  }
+  *{box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:"Vazirmatn","Segoe UI",Tahoma,sans-serif;margin:0;padding:24px;line-height:1.9}
+  h1{font-size:20px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:20px}
+  .grid{display:grid;grid-template-columns:1fr;gap:20px;max-width:900px;margin:0 auto}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:20px}
+  label{display:block;font-size:13px;color:var(--muted);margin:12px 0 6px}
+  input[type=text],select,textarea,input[type=password]{
+    width:100%;background:var(--panel2);border:1px solid var(--border);border-radius:8px;
+    color:var(--text);padding:10px 12px;font-family:inherit;font-size:14px
+  }
+  textarea{resize:vertical;min-height:70px}
+  input[type=file]{width:100%;background:var(--panel2);border:1px dashed var(--border);border-radius:8px;padding:14px;color:var(--muted)}
+  .row{display:flex;gap:12px}
+  .row > div{flex:1}
+  button{cursor:pointer;border:none;border-radius:8px;padding:11px 18px;font-family:inherit;font-size:14px;font-weight:600}
+  .btn-primary{background:var(--accent);color:#fff;width:100%;margin-top:18px}
+  .btn-primary:disabled{opacity:.5;cursor:not-allowed}
+  .btn-ghost{background:transparent;color:var(--muted);border:1px solid var(--border)}
+  .btn-danger{background:transparent;color:var(--red);border:1px solid var(--border)}
+  details summary{cursor:pointer;color:var(--muted);font-size:13px}
+  .msg{padding:10px 14px;border-radius:8px;font-size:13px;margin-top:12px}
+  .msg.error{background:#3a1620;color:#ff8b8f;border:1px solid #5c2530}
+  .msg.info{background:#122238;color:#9cc2ff;border:1px solid #24365c}
+  .badge{display:inline-block;padding:4px 12px;border-radius:999px;font-size:13px;font-weight:700}
+  .b-buy{background:#123a2a;color:var(--green)}
+  .b-sell{background:#3a1620;color:var(--red)}
+  .b-hold{background:#3a2f12;color:var(--amber)}
+  .b-unknown{background:#22263a;color:var(--gray)}
+  .kv{display:grid;grid-template-columns:120px 1fr;gap:6px 12px;font-size:14px;margin:14px 0}
+  .kv b{color:var(--muted);font-weight:500}
+  ul.plain{margin:6px 0;padding-inline-start:20px}
+  .head-row{display:flex;justify-content:space-between;align-items:center}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px}
+  th,td{padding:8px 10px;border-bottom:1px solid var(--border);text-align:right}
+  th{color:var(--muted);font-weight:500}
+  a{color:var(--accent);text-decoration:none}
+  .pager{display:flex;gap:8px;justify-content:center;margin-top:14px}
+  .hidden{display:none}
+  .spin{display:inline-block;width:14px;height:14px;border:2px solid #ffffff55;border-top-color:#fff;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px;margin-left:6px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="grid">
+  <div>
+    <h1>📊 تحلیل‌ساز بورس</h1>
+    <div class="sub">مدل فعال: {{ model_name }} · حداکثر {{ max_images }} تصویر · حداکثر {{ max_mb }} مگابایت</div>
+  </div>
+
+  <div class="card">
+    <div class="head-row">
+      <strong>تحلیل جدید</strong>
+      <details>
+        <summary>کلید API (اختیاری)</summary>
+        <input type="password" id="apiKey" placeholder="در صورت تنظیم BRS_API_KEY، اینجا وارد کن" style="margin-top:8px">
+      </details>
+    </div>
+
+    <form id="analyzeForm">
+      <div class="row">
+        <div>
+          <label>نماد</label>
+          <input type="text" id="symbol" placeholder="مثلاً شبندر" required>
+        </div>
+        <div>
+          <label>تایم‌فریم</label>
+          <select id="timeframe">
+            {% for tf in timeframes %}
+            <option value="{{ tf }}">{{ tf }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+
+      <label>یادداشت (اختیاری)</label>
+      <textarea id="notes" placeholder="مثلاً: پوزیشن باز دارم، قیمت خرید ۱۲۰۰..."></textarea>
+
+      <label>تصاویر چارت / تابلو</label>
+      <input type="file" id="images" accept="image/png,image/jpeg,image/webp" multiple>
+
+      <button type="submit" class="btn-primary" id="submitBtn">شروع تحلیل</button>
+    </form>
+
+    <div id="formMsg"></div>
+  </div>
+
+  <div class="card hidden" id="resultCard">
+    <div class="head-row">
+      <span id="resSignal" class="badge b-unknown">—</span>
+      <span id="resConfidence" class="sub"></span>
+    </div>
+    <div id="resDataSource" class="msg info" style="margin-top:10px"></div>
+    <div class="kv">
+      <b>روند</b><span id="resTrend">—</span>
+      <b>محدوده ورود</b><span id="resEntry">—</span>
+      <b>حد ضرر</b><span id="resStop">—</span>
+      <b>اهداف</b><span id="resTargets">—</span>
+      <b>اندیکاتورها</b><span id="resIndicators">—</span>
+    </div>
+    <div><b>دلایل:</b><ul class="plain" id="resReasons"></ul></div>
+    <div><b>ریسک‌ها:</b><ul class="plain" id="resRisks"></ul></div>
+    <div style="margin-top:10px"><b>جمع‌بندی:</b><p id="resSummary" style="color:var(--muted)"></p></div>
+    <a id="resPdf" class="btn-ghost" style="display:inline-block;margin-top:8px;padding:8px 14px" target="_blank">دانلود PDF</a>
+  </div>
+
+  <div class="card">
+    <div class="head-row">
+      <strong>تاریخچه</strong>
+      <button class="btn-ghost" id="refreshHistory">بروزرسانی</button>
+    </div>
+    <table>
+      <thead><tr><th>تاریخ</th><th>نماد</th><th>تایم‌فریم</th><th>سیگنال</th><th>اطمینان</th><th></th></tr></thead>
+      <tbody id="historyBody"></tbody>
+    </table>
+    <div class="pager">
+      <button class="btn-ghost" id="prevPage">قبلی</button>
+      <span id="pageInfo" class="sub"></span>
+      <button class="btn-ghost" id="nextPage">بعدی</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let page = 1;
+const PAGE_SIZE = 10;
+
+function apiHeaders(extra) {
+  const key = localStorage.getItem('brs_api_key') || '';
+  const h = Object.assign({}, extra || {});
+  if (key) h['X-API-Key'] = key;
+  return h;
+}
+
+$('apiKey').value = localStorage.getItem('brs_api_key') || '';
+$('apiKey').addEventListener('change', (e) => {
+  localStorage.setItem('brs_api_key', e.target.value.trim());
+});
+
+function badgeClass(signal) {
+  if (signal === 'خرید') return 'b-buy';
+  if (signal === 'فروش') return 'b-sell';
+  if (signal === 'نگهداری') return 'b-hold';
+  return 'b-unknown';
+}
+
+function showMsg(text, type) {
+  $('formMsg').innerHTML = `<div class="msg ${type}">${text}</div>`;
+}
+
+$('analyzeForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const symbol = $('symbol').value.trim();
+  if (!symbol) return;
+
+  const fd = new FormData();
+  fd.append('symbol', symbol);
+  fd.append('timeframe', $('timeframe').value);
+  fd.append('notes', $('notes').value);
+  for (const f of $('images').files) fd.append('images', f);
+
+  const btn = $('submitBtn');
+  btn.disabled = true;
+  btn.innerHTML = 'در حال تحلیل...<span class="spin"></span>';
+  $('formMsg').innerHTML = '';
+
+  try {
+    const res = await fetch('/analyze', { method: 'POST', body: fd, headers: apiHeaders() });
+    const json = await res.json();
+    if (!res.ok || !json.ok) {
+      showMsg(json.error || 'خطای نامشخص در تحلیل.', 'error');
+      return;
+    }
+    renderResult(json.data);
+    loadHistory();
+  } catch (err) {
+    showMsg('ارتباط با سرور برقرار نشد: ' + err, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'شروع تحلیل';
+  }
+});
+
+function renderResult(d) {
+  $('resultCard').classList.remove('hidden');
+  const badge = $('resSignal');
+  badge.textContent = d.signal;
+  badge.className = 'badge ' + badgeClass(d.signal);
+  $('resConfidence').textContent = 'درجه اطمینان: ' + d.confidence + '٪';
+
+  const src = $('resDataSource');
+  if (d.used_real_data) {
+    src.className = 'msg info';
+    src.textContent = '✅ این تحلیل بر مبنای دیتای عددی واقعی TSETMC انجام شده (نه فقط حدس از روی عکس).';
+  } else {
+    src.className = 'msg error';
+    src.textContent = '⚠️ دیتای عددی TSETMC در دسترس نبود؛ تحلیل فقط بر مبنای تصاویر انجام شد' + (d.market_note ? ('. جزئیات: ' + d.market_note) : '.');
+  }
+
+  $('resTrend').textContent = d.trend || '—';
+  $('resEntry').textContent = d.entry || '—';
+  $('resStop').textContent = d.stop_loss || '—';
+  $('resTargets').textContent = (d.targets && d.targets.length) ? d.targets.join('، ') : '—';
+  $('resIndicators').textContent = d.indicators || '—';
+  $('resReasons').innerHTML = (d.reasons || []).map(r => `<li>${r}</li>`).join('') || '<li>—</li>';
+  $('resRisks').innerHTML = (d.risks || []).map(r => `<li>${r}</li>`).join('') || '<li>—</li>';
+  $('resSummary').textContent = d.summary || '—';
+  $('resPdf').href = '/pdf/' + d.id + (localStorage.getItem('brs_api_key') ? ('?key=' + encodeURIComponent(localStorage.getItem('brs_api_key'))) : '');
+}
+
+async function loadHistory() {
+  try {
+    const res = await fetch(`/api/history?page=${page}&page_size=${PAGE_SIZE}`, { headers: apiHeaders() });
+    const json = await res.json();
+    if (!json.ok) return;
+    const body = $('historyBody');
+    body.innerHTML = json.data.map(row => `
+      <tr>
+        <td>${row.created_at}</td>
+        <td>${row.symbol}</td>
+        <td>${row.timeframe || '—'}</td>
+        <td><span class="badge ${badgeClass(row.signal)}">${row.signal}</span></td>
+        <td>${row.confidence}٪</td>
+        <td>
+          <a href="/pdf/${row.id}${localStorage.getItem('brs_api_key') ? ('?key=' + encodeURIComponent(localStorage.getItem('brs_api_key'))) : ''}">PDF</a>
+          &nbsp;
+          <a href="#" onclick="deleteRow(${row.id});return false;" style="color:var(--red)">حذف</a>
+        </td>
+      </tr>`).join('') || '<tr><td colspan="6" style="color:var(--muted)">هنوز تحلیلی ثبت نشده.</td></tr>';
+    const totalPages = Math.max(1, Math.ceil(json.total / PAGE_SIZE));
+    $('pageInfo').textContent = `صفحه ${page} از ${totalPages}`;
+  } catch (err) { /* silent */ }
+}
+
+async function deleteRow(id) {
+  if (!confirm('این رکورد حذف شود؟')) return;
+  await fetch('/api/analysis/' + id, { method: 'DELETE', headers: apiHeaders() });
+  loadHistory();
+}
+
+$('refreshHistory').addEventListener('click', loadHistory);
+$('prevPage').addEventListener('click', () => { if (page > 1) { page--; loadHistory(); } });
+$('nextPage').addEventListener('click', () => { page++; loadHistory(); });
+
+loadHistory();
+</script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+flask
+google-genai
+pillow
+reportlab
+arabic-reshaper
+python-bidi
+pandas
+numpy
+openpyxl

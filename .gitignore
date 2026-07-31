@@ -1,0 +1,17 @@
+.env
+
+pycache/
+
+*.pyc
+
+analysis.db
+
+analysis_history.xlsx
+
+brs.log
+
+*.log
+
+venv/
+
+.vscode/
