@@ -225,8 +225,11 @@ def build_prompt(symbol, timeframe, notes, n_images, indicator_text=None):
         "۲) عدد از خودت نساز؛ فقط از سطوح قابل مشاهده در تصاویر استفاده کن.",
         "۳) confidence عددی بین ۰ تا ۱۰۰.",
         "۴) کل خروجی فارسی باشد.",
+        "۵) reasons حداکثر ۴ مورد، risks حداکثر ۳ مورد، هرکدام یک جمله‌ی کوتاه (نه پاراگراف).",
+        "۶) summary حداکثر ۳ خط کوتاه.",
         "",
-        "فقط و فقط یک شیء JSON با این کلیدها برگردان (بدون توضیح اضافه):",
+        "فقط و فقط یک شیء JSON کامل و معتبر با این کلیدها برگردان (بدون توضیح اضافه، بدون "
+        "فنس مارک‌داون، و بدون هیچ متنی قبل یا بعد از JSON):",
         '{"signal": "خرید|فروش|نگهداری|نامشخص",',
         ' "confidence": 0,',
         ' "entry": "محدوده ورود",',
@@ -258,8 +261,8 @@ def validate_and_prepare_image(file_storage):
         img.verify()
         img = Image.open(io.BytesIO(raw))  # بعد از verify باید دوباره باز شود
         img.load()
-    except (UnidentifiedImageError, OSError, ValueError):
-        return None, None, "فایل «%s» یک تصویر معتبر نیست." % file_storage.filename
+    except Exception:
+        return None, None, "فایل «%s» یک تصویر معتبر نیست یا خراب است." % file_storage.filename
 
     fmt = (img.format or "").upper()
     fmt_to_mime = {"PNG": "image/png", "JPEG": "image/jpeg", "JPG": "image/jpeg", "WEBP": "image/webp"}
@@ -301,7 +304,7 @@ def call_gemini(prompt, images):
 
     config = types.GenerateContentConfig(
         temperature=0.25,
-        max_output_tokens=2048,
+        max_output_tokens=8192,
         response_mime_type="application/json",
     )
 
@@ -314,15 +317,20 @@ def call_gemini(prompt, images):
                 config=config,
             )
             text = (getattr(resp, "text", "") or "").strip()
-            if text:
-                return text
-            reason = None
+            finish_reason = None
             try:
-                reason = resp.candidates[0].finish_reason
+                finish_reason = resp.candidates[0].finish_reason
             except Exception:
                 pass
+            if finish_reason and str(finish_reason).upper().find("MAX_TOKEN") != -1:
+                log.warning(
+                    "پاسخ Gemini به‌خاطر رسیدن به سقف طول (max_output_tokens) بریده شده "
+                    "و ممکن است JSON ناقص باشد. طول متن دریافتی: %d کاراکتر.", len(text)
+                )
+            if text:
+                return text
             raise RuntimeError(
-                "پاسخی از مدل دریافت نشد" + (" (دلیل: %s)" % reason if reason else "") + "."
+                "پاسخی از مدل دریافت نشد" + (" (دلیل: %s)" % finish_reason if finish_reason else "") + "."
             )
         except (APIError, ConnectionError, OSError, TimeoutError) as exc:
             last_error = exc
